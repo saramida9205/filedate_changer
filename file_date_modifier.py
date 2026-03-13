@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QMenu, QAbstractItemView, QLineEdit, QRadioButton, QGroupBox
 )
 from PyQt6.QtCore import Qt, QDateTime, QDir, QModelIndex, QPoint, QSortFilterProxyModel
-from PyQt6.QtGui import QAction, QCursor, QFileSystemModel
+from PyQt6.QtGui import QAction, QCursor, QFileSystemModel, QIcon
 
 class CustomFileSystemModel(QFileSystemModel):
     """'만든 날짜' 컬럼을 추가하고 순서를 조정한 커스텀 파일 시스템 모델"""
@@ -60,6 +60,11 @@ class FileDateModifier(QMainWindow):
         super().__init__()
         self.setWindowTitle("파일 및 폴더 날짜 수정기 (Explorer 스타일) - SaRaM_ida(망고아빠)")
         self.resize(1300, 800) # 컬럼 추가로 너비 확장
+
+        # 아이콘 설정 (사용자 요청)
+        icon_path = os.path.join(os.path.dirname(__file__), "app_icon.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         # 복사/붙여넣기를 위한 클립보드 변수
         self.clipboard_paths = []
