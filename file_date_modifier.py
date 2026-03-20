@@ -185,18 +185,44 @@ class FileDateModifier(QMainWindow):
         right_layout.addWidget(btn_clear_list)
 
         # 날짜 조절 섹션
-        date_group = QVBoxLayout()
-        date_group.addWidget(QLabel("변경할 일자 및 시간:"))
-        self.date_edit = QDateTimeEdit(QDateTime.currentDateTime())
-        self.date_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
-        self.date_edit.setCalendarPopup(True)
-        date_group.addWidget(self.date_edit)
+        date_group = QGroupBox("변경할 일자 및 시간")
+        date_group_layout = QVBoxLayout()
+
+        # 만든 날짜
+        date_group_layout.addWidget(QLabel("만든 날짜:"))
+        self.creation_date_edit = QDateTimeEdit(QDateTime.currentDateTime())
+        self.creation_date_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.creation_date_edit.setCalendarPopup(True)
+        date_group_layout.addWidget(self.creation_date_edit)
+
+        # 수정된 날짜
+        date_group_layout.addWidget(QLabel("수정된 날짜:"))
+        self.modified_date_edit = QDateTimeEdit(QDateTime.currentDateTime())
+        self.modified_date_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.modified_date_edit.setCalendarPopup(True)
+        date_group_layout.addWidget(self.modified_date_edit)
+
+        # 동기화 체크박스 (두 날짜를 동일하게 맞출지 여부)
+        from PyQt6.QtWidgets import QCheckBox
+        self.sync_dates_checkbox = QCheckBox("만든 날짜와 수정된 날짜를 동일하게")
+        self.sync_dates_checkbox.setChecked(True)
+        self.sync_dates_checkbox.stateChanged.connect(self.on_sync_dates_changed)
+        date_group_layout.addWidget(self.sync_dates_checkbox)
+
+        # 동기화 활성화 시 만든 날짜 변경하면 수정된 날짜도 따라가도록
+        self.creation_date_edit.dateTimeChanged.connect(self.on_creation_date_changed)
+
+        date_group.setLayout(date_group_layout)
+
+        # 초기 상태: 동기화 체크 시 수정날짜 비활성화
+        self.modified_date_edit.setEnabled(False)
 
         btn_change = QPushButton("변경")
         btn_change.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; height: 40px;")
         btn_change.clicked.connect(self.run_date_change)
-        date_group.addWidget(btn_change)
-        right_layout.addLayout(date_group)
+
+        right_layout.addWidget(date_group)
+        right_layout.addWidget(btn_change)
         
         # 엔터 키 동작 설정 옵션 (사용자 요청)
         enter_opt_group = QGroupBox("엔터 키 동작 설정")
@@ -351,9 +377,10 @@ class FileDateModifier(QMainWindow):
         if not unique_paths: return
         unique_paths_list = list(unique_paths)
 
-        target_date = self.date_edit.dateTime().toString("yyyy-MM-dd HH:mm:ss")
-        reply = QMessageBox.question(self, '날짜 변경 확인', 
-                                     f"선택한 {len(unique_paths_list)}개 항목의 날짜를\n[{target_date}]로 변경하시겠습니까?",
+        creation_date = self.creation_date_edit.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+        modified_date = self.modified_date_edit.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+        msg = f"선택한 {len(unique_paths_list)}개 항목의 날짜를 변경하시겠습니까?\n만든 날짜: [{creation_date}]\n수정된 날짜: [{modified_date}]"
+        reply = QMessageBox.question(self, '날짜 변경 확인', msg,
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         
         if reply == QMessageBox.StandardButton.Yes:
@@ -573,17 +600,121 @@ class FileDateModifier(QMainWindow):
         self.list_remembered.clear()
         self.log_display.append("리스트 초기화됨.")
 
+    def on_sync_dates_changed(self, state):
+        """동기화 체크박스 상태 변경 시 호출"""
+        if state == 2:  # Checked
+            # 체크 시 수정된 날짜를 만든 날짜와 동기화
+            self.modified_date_edit.setDateTime(self.creation_date_edit.dateTime())
+            self.modified_date_edit.setEnabled(False)
+        else:
+            self.modified_date_edit.setEnabled(True)
+
+    def on_creation_date_changed(self, datetime):
+        """만든 날짜 변경 시 동기화 체크박스가 켜져 있으면 수정 날짜도 함께 변경"""
+        if self.sync_dates_checkbox.isChecked():
+            self.modified_date_edit.setDateTime(datetime)
+
+    def is_file_locked(self, path):
+        """파일이 다른 프로세스에서 사용 중인지 확인 (폴더는 항상 False 반환)"""
+        if os.path.isdir(path):
+            return False
+        try:
+            # 배타적 쓰기 모드로 파일 열기를 시도하여 잠금 확인
+            import msvcrt
+            handle = open(path, 'r+b')
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                handle.close()
+                return False
+            except (IOError, OSError):
+                handle.close()
+                return True
+        except (IOError, OSError, PermissionError):
+            return True
+
+    def get_locking_processes(self, path):
+        """PowerShell을 사용하여 파일을 사용 중인 프로세스 이름 조회"""
+        try:
+            safe_path = path.replace("'", "''")
+            # handle.exe가 없어도 동작하는 PowerShell 기반 조회
+            ps_cmd = (
+                f"try {{ "
+                f"$proc = Get-Process | Where-Object {{ $_.Modules.FileName -eq '{safe_path}' -or "
+                f"($_.MainModule.FileName -eq '{safe_path}') }} | Select-Object -ExpandProperty Name -Unique; "
+                f"if ($proc) {{ $proc -join ', ' }} else {{ "
+                f"$h = & handle.exe '{safe_path}' 2>$null; "
+                f"if ($h) {{ ($h | Select-String 'pid:' | ForEach-Object {{ ($_ -split '\\s+')[0] }}) -join ', ' }} "
+                f"else {{ '' }} }} "
+                f"}} catch {{ '' }}"
+            )
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                capture_output=True, text=True, shell=False,
+                creationflags=0x08000000, timeout=5
+            )
+            proc_names = result.stdout.strip()
+            return proc_names if proc_names else None
+        except Exception:
+            return None
+
     def run_date_change(self):
         if not self.remembered_paths:
             QMessageBox.warning(self, "알림", "수정할 경로가 기억되어 있지 않습니다. '경로기억'을 눌러주세요.")
             return
 
-        target_date = self.date_edit.dateTime().toString("yyyy-MM-dd HH:mm:ss")
-        self.log_display.append(f"\n--- 날짜 변경 시작 (대상: {target_date}) ---")
+        creation_date = self.creation_date_edit.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+        modified_date = self.modified_date_edit.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+
+        # 사전 검사: 사용 중인 파일 확인
+        locked_files = []
+        self.log_display.append(f"\n--- 파일 사용 상태 검사 중... ---")
+        QApplication.processEvents()  # UI 업데이트
+
+        for path in self.remembered_paths:
+            if not os.path.exists(path):
+                continue
+            if self.is_file_locked(path):
+                proc_info = self.get_locking_processes(path)
+                locked_files.append((path, proc_info))
+
+        if locked_files:
+            # 사용 중인 파일 목록을 보여주고 사용자에게 선택권 부여
+            msg = f"다음 {len(locked_files)}개 파일이 다른 프로세스에서 사용 중입니다:\n\n"
+            for lf_path, lf_proc in locked_files:
+                basename = os.path.basename(lf_path)
+                if lf_proc:
+                    msg += f"  • {basename} (사용 중: {lf_proc})\n"
+                else:
+                    msg += f"  • {basename} (사용 중인 프로세스 확인 불가)\n"
+            msg += f"\n사용 중인 파일을 건너뛰고 나머지만 변경하시겠습니까?\n(아니오 = 전체 작업 취소)"
+            
+            reply = QMessageBox.question(
+                self, '사용 중인 파일 발견', msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                self.log_display.append("사용자가 작업을 취소했습니다.")
+                return
+            
+            locked_set = {lf[0] for lf in locked_files}
+            self.log_display.append(f"사용 중인 {len(locked_files)}개 파일을 건너뜁니다.")
+        else:
+            locked_set = set()
+            self.log_display.append("모든 파일이 사용 가능합니다.")
+
+        self.log_display.append(f"\n--- 날짜 변경 시작 ---")
+        self.log_display.append(f"  만든 날짜: {creation_date}")
+        self.log_display.append(f"  수정된 날짜: {modified_date}")
 
         for i, path in enumerate(self.remembered_paths):
             if not os.path.exists(path):
                 self.log_display.append(f"[{i+1}/{len(self.remembered_paths)}] 오류: 존재하지 않는 경로 {path}")
+                continue
+
+            # 사용 중인 파일 건너뛰기
+            if path in locked_set:
+                self.log_display.append(f"[{i+1}/{len(self.remembered_paths)}] 건너뜀(사용 중): {os.path.basename(path)}")
                 continue
 
             # 읽기 전용 속성 체크 및 해제
@@ -596,12 +727,12 @@ class FileDateModifier(QMainWindow):
             except Exception as e:
                 self.log_display.append(f"경고: 속성 변경 실패 ({str(e)})")
 
-            # PowerShell 명령어 구성 (CreationTime과 LastWriteTime 모두 수정)
+            # PowerShell 명령어 구성 (CreationTime과 LastWriteTime 각각 다른 날짜로 수정)
             safe_path = path.replace("'", "''")
             ps_command = (
                 f'$item = Get-Item -LiteralPath \'{safe_path}\'; '
-                f'$item.CreationTime = [DateTime]"{target_date}"; '
-                f'$item.LastWriteTime = [DateTime]"{target_date}"'
+                f'$item.CreationTime = [DateTime]"{creation_date}"; '
+                f'$item.LastWriteTime = [DateTime]"{modified_date}"'
             )
             
             try:
@@ -610,7 +741,7 @@ class FileDateModifier(QMainWindow):
                     ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_command],
                     capture_output=True,
                     text=True,
-                    shell=False, # 리스트 리스트 형태로 전달하므로 False가 안전
+                    shell=False,
                     creationflags=0x08000000 # CREATE_NO_WINDOW
                 )
 
@@ -628,9 +759,6 @@ class FileDateModifier(QMainWindow):
 
             except Exception as e:
                 self.log_display.append(f"치명적 에러: {str(e)}")
-            
-            # 대량 작업 시 시스템 부하 알림 및 처리 지연 방지 (필요 시 아주 짧은 지연)
-            # import time; time.sleep(0.01)
 
         self.log_display.append("--- 모든 작업 완료 ---")
         self.refresh_list() # 모든 작업 완료 후 자동 새로고침
